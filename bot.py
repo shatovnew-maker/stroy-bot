@@ -247,34 +247,68 @@ ZSPK_RE = re.compile(
     r"Инициатор:\s*(?P<init>.+?)\s+Ответственный комитет:\s*(?P<com>.+?)"
     r"(?:\s+Стадия рассмотрения:\s*(?P<stage>.+?))?"
     r"(?=\s+Файлы:|\s+\d{1,3}\s+№|\s+©|\s*$)", re.S)
+# в HTML-заглушке без списка — ничего не найдётся, и источник будет помечен как «пусто»
+
+
+def zspk_url(src: dict) -> str:
+    """Список ЗС Приморья подгружается отдельным запросом getResultGrid; берём документы за ~4 месяца."""
+    dfrom = (now_utc() - dt.timedelta(days=src.get("days", 120))).strftime("%d.%m.%Y")
+    return (f"{src['base']}/Home/getResultGrid?ais_uid=1&type={src['doc_type']}"
+            f"&dfrom={dfrom}&RowsOnPage=50&NumPage=1")
 
 
 def fetch_zspk_acts(src: dict, cfg: dict) -> list[tuple[Act, dt.datetime | None, bool]]:
     from bs4 import BeautifulSoup
-    r = http_get(src["url"])
+    url = zspk_url(src)
+    r = http_get(url)
     r.raise_for_status()
+    LAST_PAGE[src["url"]] = LAST_PAGE.get(url, "")
     soup = BeautifulSoup(r.text, "html.parser")
-    links = []
-    for a in soup.find_all("a", href=True):
-        if "/Doc/" in a["href"]:
-            links.append((re.sub(r"\s+", " ", a.get_text(" ")).strip(), urljoin(src["base"], a["href"])))
-    text = re.sub(r"\s+", " ", soup.get_text(" "))
     out = []
-    for m in ZSPK_RE.finditer(text):
+    for block in soup.select("table.FindResultGrid"):
+        text = re.sub(r"\s+", " ", block.get_text(" ")).strip()
+        m = ZSPK_RE.search(text + " ")
+        if not m:
+            continue
+        a = block.find("a", href=re.compile(r"/Doc/"))
+        link = urljoin(src["base"], a["href"]) if a else src["url"]
         title = m["title"].strip()
-        url = next((u for t, u in links if t and title.startswith(t[:40])), src["url"])
         stage = (m["stage"] or "").strip()
         # стадия входит в ключ: переход законопроекта на новую стадию — тоже новость
         key = f"zspk|{m['num']}|{stage}"
-        when = parse_any_date(m["date"])
-        act = Act(key=key, title=title, url=url, source=src["short"], level="regional",
+        act = Act(key=key, title=title, url=link, source=src["short"], level="regional",
                   kind=src.get("kind", ""), date=m["date"],
                   extra=f"№ {m['num']}" + (f" · стадия: {stage}" if stage else ""))
-        out.append((act, when, bool(cfg["_law"].search(title)) and not cfg["_skip"].search(title)))
+        out.append((act, parse_any_date(m["date"]), bool(cfg["_law"].search(title)) and not cfg["_skip"].search(title)))
     return out
 
 
-FETCHERS = {"rss": fetch_rss_acts, "links": fetch_link_acts, "zspk": fetch_zspk_acts}
+def fetch_faufcc_acts(src: dict, cfg: dict) -> list[tuple[Act, dt.datetime | None, bool]]:
+    """Сайт ФЦС собирается скриптом; новости берём из его API."""
+    r = http_get(src["api"])
+    r.raise_for_status()
+    LAST_PAGE[src["url"]] = LAST_PAGE.get(src["api"], "")
+    data = r.json()
+    items = data.get("data", []) if isinstance(data, dict) else data
+    out = []
+    for it in items:
+        title = (it.get("name") or "").strip()
+        link = urljoin(src["base"], it.get("link") or "")
+        when = None
+        if it.get("publishedAt"):
+            try:
+                when = dt.datetime.fromisoformat(it["publishedAt"]).astimezone(UTC)
+            except ValueError:
+                pass
+        act = Act(key=f"{src['short']}|{link}", title=title, url=link, source=src["short"],
+                  level=src["level"], kind="новость", date=when.strftime("%d.%m.%Y") if when else "")
+        text = f"{title} {it.get('excerpt') or ''}"
+        out.append((act, when, bool(cfg["_law"].search(text)) and not cfg["_skip"].search(title)))
+    return out
+
+
+FETCHERS = {"rss": fetch_rss_acts, "links": fetch_link_acts, "zspk": fetch_zspk_acts,
+            "faufcc": fetch_faufcc_acts}
 
 
 def collect_acts(cfg: dict, st: dict, hours: int) -> tuple[list[Act], list[str]]:
@@ -609,8 +643,28 @@ def build_alert(acts: list[Act]) -> list[str]:
     return chunk(blocks)
 
 
+def telegram_check(token: str, chat: str) -> None:
+    """Пишет в журнал, видит ли Telegram бота. Сам токен в журнал не попадает."""
+    if not re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{30,}", token):
+        log.error("TELEGRAM_BOT_TOKEN выглядит неправильно: длина %d, есть ли двоеточие: %s",
+                  len(token), ":" in token)
+    if not re.fullmatch(r"-?\d+", chat):
+        log.error("TELEGRAM_CHAT_ID должен состоять из цифр, сейчас длина %d", len(chat))
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=(10, 20))
+        info = r.json()
+        if info.get("ok"):
+            log.info("Telegram: бот @%s на связи", info["result"].get("username"))
+        else:
+            log.error("Telegram: getMe ответил %s — %s", r.status_code, info.get("description"))
+    except Exception as exc:
+        log.error("Telegram: getMe не прошёл: %s", type(exc).__name__)
+
+
 def send_telegram(messages: list[str]) -> None:
-    token, chat = os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
+    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    chat = os.environ["TELEGRAM_CHAT_ID"].strip()
+    telegram_check(token, chat)
     for text in messages:
         for attempt in range(3):
             try:
@@ -618,10 +672,11 @@ def send_telegram(messages: list[str]) -> None:
                                   json={"chat_id": chat, "text": text, "parse_mode": "HTML",
                                         "disable_web_page_preview": True}, timeout=(10, 60))
             except requests.RequestException as exc:
-                log.warning("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
+                log.error("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
                 time.sleep(5)
                 continue
             if r.status_code == 429:
+                log.error("Telegram просит подождать: %s", r.text[:200])
                 time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) + 1)
                 continue
             if not r.ok:
