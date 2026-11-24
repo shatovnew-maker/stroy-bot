@@ -170,29 +170,26 @@ legal_sources:
     level: federal
   - name: ФАУ «ФЦС» (своды правил)
     short: ФАУ ФЦС
-    type: links
+    type: faufcc
     url: https://faufcc.ru/press-tsentr/novosti
+    api: "https://api.faufcc.ru/api/publications?page=1&filters=%7B%22page%22:%22532841ac-0180-4ef6-a4bd-cdac2849acb4%22%7D&pageId=532841ac-0180-4ef6-a4bd-cdac2849acb4"
     base: https://faufcc.ru
-    link_pattern: "^/press-tsentr/novosti/[a-z0-9-]{10,}$"
     level: federal
   - name: ЗС Приморья — законопроекты
     short: ЗС Приморья
     type: zspk
-    url: https://monitoring.zspk.gov.ru/Home/Index?ais_uid=1&type=zp&RowsOnPage=50
+    url: https://monitoring.zspk.gov.ru/Home/Index?ais_uid=1&type=zp
+    doc_type: zp
     base: https://monitoring.zspk.gov.ru
     kind: законопроект
     level: regional
   - name: ЗС Приморья — принятые законы
     short: ЗС Приморья
     type: zspk
-    url: https://monitoring.zspk.gov.ru/Home/Index?ais_uid=1&type=zakon&RowsOnPage=50
+    url: https://monitoring.zspk.gov.ru/Home/Index?ais_uid=1&type=zakon
+    doc_type: zakon
     base: https://monitoring.zspk.gov.ru
     kind: закон
-    level: regional
-  - name: ЗС Приморья — новости
-    short: ЗС Приморья
-    type: rss
-    url: https://www.zspk.gov.ru/press-service/yandex-rss.php
     level: regional
   - name: Администрация Владивостока
     short: Администрация Владивостока
