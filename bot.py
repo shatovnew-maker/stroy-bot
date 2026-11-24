@@ -666,24 +666,24 @@ def send_telegram(messages: list[str]) -> None:
     chat = os.environ["TELEGRAM_CHAT_ID"].strip()
     telegram_check(token, chat)
     for text in messages:
-        for attempt in range(3):
+        for attempt in range(6):
             try:
                 r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                                   json={"chat_id": chat, "text": text, "parse_mode": "HTML",
                                         "disable_web_page_preview": True}, timeout=(10, 60))
             except requests.RequestException as exc:
                 log.error("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
-                time.sleep(5)
+                time.sleep(15 * (attempt + 1))
                 continue
             if r.status_code == 429:
                 log.error("Telegram просит подождать: %s", r.text[:200])
-                time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) + 1)
+                time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) * (attempt + 1) + 5)
                 continue
             if not r.ok:
                 raise RuntimeError(f"Telegram ответил {r.status_code}: {r.text[:300]}")
             break
         else:
-            raise RuntimeError("Telegram не принял сообщение после 3 попыток")
+            raise RuntimeError("Telegram не принял сообщение после 6 попыток")
         time.sleep(1.1)
 
 
