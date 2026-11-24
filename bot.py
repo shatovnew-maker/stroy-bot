@@ -97,9 +97,23 @@ def rx(words: list[str]) -> re.Pattern:
     return re.compile("|".join(f"(?:{w})" for w in words), re.IGNORECASE)
 
 
-def http_get(url: str, timeout: int = 25) -> requests.Response:
-    return requests.get(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"},
-                        timeout=timeout)
+LAST_PAGE: dict[str, str] = {}
+
+
+def page_hint(url: str) -> str:
+    return LAST_PAGE.get(url, "")
+
+
+def http_get(url: str, timeout=(10, 20)) -> requests.Response:
+    r = requests.get(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"},
+                     timeout=timeout)
+    if any(h in url for h in ("gov.ru", "faufcc", "vlc.ru")):
+        title = re.search(r"<title[^>]*>(.*?)</title>", r.text or "", re.S | re.I)
+        LAST_PAGE[url] = f"HTTP {r.status_code}, {len(r.text or '')} симв., заголовок: " + \
+            (re.sub(r"\s+", " ", title[1]).strip()[:80] if title else "нет")
+    return r
+
+
 
 
 def load_config(path: Path) -> dict:
@@ -285,7 +299,7 @@ def collect_acts(cfg: dict, st: dict, hours: int) -> tuple[list[Act], list[str]]
             failed.append(src["name"])
             continue
         if not items:   # на этих страницах всегда что-то есть: пусто = сайт поменял вёрстку или отдал заглушку
-            log.warning("Источник открылся, но записей не нашлось: %s", src["name"])
+            log.warning("Источник открылся, но записей не нашлось: %s (%s)", src["name"], page_hint(src["url"]))
             failed.append(src["name"] + " (пусто)")
             continue
         first_time = src["name"] not in st["bootstrapped"]
@@ -385,19 +399,22 @@ def resolve_google(items: list[News]) -> None:
         from googlenewsdecoder import gnewsdecoder
     except ImportError:
         return
-    for n in todo:
+    def one(n):
         try:
-            res = gnewsdecoder(n.url, interval=1)
-            if res.get("success"):
+            res = gnewsdecoder(n.url, interval=0)
+            if res.get("status") or res.get("success"):
                 n.url = res["decoded_url"]
         except Exception:
             pass
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        list(pool.map(one, todo))
 
 
 def article_text(url: str) -> str:
     try:
         import trafilatura
-        r = http_get(url, timeout=20)
+        r = http_get(url, timeout=(8, 15))
         if r.status_code >= 400:
             return ""
         return trafilatura.extract(r.text, url=url, include_comments=False, favor_recall=True) or ""
@@ -420,11 +437,38 @@ def select_news(raw: list[News], cfg: dict, st: dict) -> list[News]:
         if is_excluded(n.domain, cfg) or n.key in st["seen"]:
             continue
         uniq.setdefault(n.key, n)
-    cands = list(uniq.values())
-    resolve_google(cands)
+    # предварительный отбор по заголовку и сжатие похожих заголовков — чтобы не открывать сотни статей
+    pre: list[News] = []
+    for n in sorted(uniq.values(), key=lambda x: -x.published.timestamp()):
+        head = f"{n.title} {n.snippet}"
+        if n.group == "federal_law":
+            if not (cfg["_law"].search(n.title) and cfg["_lawnews"].search(n.title)):
+                continue
+        elif not cfg["_topic"].search(head):
+            continue
+        if any(similar(p.title, n.title) for p in pre):
+            pre.append(n)          # дубль сюжета — оставим для строки «Также», статью не открываем
+            n._dup = True          # type: ignore[attr-defined]
+            continue
+        pre.append(n)
+    limits = {"primorye": 60, "dfo": 30, "federal_law": 20}
+    taken: dict[str, int] = {}
+    cands = []
+    for n in pre:
+        if getattr(n, "_dup", False):
+            cands.append(n)
+            continue
+        taken[n.group] = taken.get(n.group, 0) + 1
+        if taken[n.group] <= limits.get(n.group, 30):
+            cands.append(n)
+    log.info("Новостей из лент: %d, после предварительного отбора: %d", len(uniq), len(cands))
+    resolve_google([n for n in cands if not getattr(n, "_dup", False)])
 
     # 2) текст статьи: для фильтра и выдержки
     def enrich(n: News) -> News:
+        if getattr(n, "_dup", False):
+            n._text = ""  # type: ignore[attr-defined]
+            return n
         text = article_text(n.url)
         n._text = text  # type: ignore[attr-defined]
         if not n.snippet:
@@ -568,11 +612,23 @@ def build_alert(acts: list[Act]) -> list[str]:
 def send_telegram(messages: list[str]) -> None:
     token, chat = os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
     for text in messages:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat, "text": text, "parse_mode": "HTML",
-                                "disable_web_page_preview": True}, timeout=30)
-        if not r.ok:
-            raise RuntimeError(f"Telegram ответил {r.status_code}: {r.text[:300]}")
+        for attempt in range(3):
+            try:
+                r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                  json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                        "disable_web_page_preview": True}, timeout=(10, 60))
+            except requests.RequestException as exc:
+                log.warning("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
+                time.sleep(5)
+                continue
+            if r.status_code == 429:
+                time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) + 1)
+                continue
+            if not r.ok:
+                raise RuntimeError(f"Telegram ответил {r.status_code}: {r.text[:300]}")
+            break
+        else:
+            raise RuntimeError("Telegram не принял сообщение после 3 попыток")
         time.sleep(1.1)
 
 
