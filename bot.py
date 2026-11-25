@@ -661,30 +661,112 @@ def telegram_check(token: str, chat: str) -> None:
         log.error("Telegram: getMe не прошёл: %s", type(exc).__name__)
 
 
-def send_telegram(messages: list[str]) -> None:
-    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-    chat = os.environ["TELEGRAM_CHAT_ID"].strip()
-    telegram_check(token, chat)
-    for text in messages:
-        for attempt in range(6):
-            try:
-                r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                                  json={"chat_id": chat, "text": text, "parse_mode": "HTML",
-                                        "disable_web_page_preview": True}, timeout=(10, 60))
-            except requests.RequestException as exc:
-                log.error("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
-                time.sleep(15 * (attempt + 1))
-                continue
-            if r.status_code == 429:
-                log.error("Telegram просит подождать: %s", r.text[:200])
-                time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) * (attempt + 1) + 5)
-                continue
-            if not r.ok:
-                raise RuntimeError(f"Telegram ответил {r.status_code}: {r.text[:300]}")
-            break
-        else:
-            raise RuntimeError("Telegram не принял сообщение после 6 попыток")
+WELCOME = ("✅ Вы подписались на «Стройка и недвижимость ДФО».\n\n"
+           "Каждое утро около 8:00 (Владивосток) — сводка новостей рынка жилья и стройки Приморья "
+           "и крупного по ДФО. Днём — срочные сообщения о новых законах и нормах.\n\n"
+           "Отписаться — /stop")
+BYE = "Вы отписались от рассылки. Вернуться — /start"
+
+
+def tg_token() -> str:
+    return os.environ["TELEGRAM_BOT_TOKEN"].strip()
+
+
+def tg_send(chat: str, text: str) -> str:
+    """Отправляет одно сообщение. Возвращает ok / blocked / fail."""
+    token = tg_token()
+    for attempt in range(6):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                    "disable_web_page_preview": True}, timeout=(10, 60))
+        except requests.RequestException as exc:
+            log.error("Telegram не ответил (попытка %d): %s", attempt + 1, type(exc).__name__)
+            time.sleep(15 * (attempt + 1))
+            continue
+        if r.status_code == 429:
+            log.error("Telegram просит подождать: %s", r.text[:200])
+            time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) * (attempt + 1) + 5)
+            continue
+        if r.status_code in (400, 403) and re.search(r"blocked|deactivated|chat not found|kicked", r.text):
+            return "blocked"
+        if not r.ok:
+            log.error("Telegram ответил %s: %s", r.status_code, r.text[:300])
+            return "fail"
+        return "ok"
+    return "fail"
+
+
+def sync_subscribers(st: dict) -> None:
+    """Забирает у Telegram новые сообщения боту: /start — подписать, /stop — отписать.
+    Telegram хранит их сутки, бот запускается чаще, так что ничего не теряется."""
+    token = tg_token()
+    subs = st.setdefault("subscribers", {})
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates",
+                         params={"offset": st.get("tg_offset", 0), "timeout": 0,
+                                 "allowed_updates": json.dumps(["message"])}, timeout=(10, 30))
+        updates = r.json().get("result", []) if r.ok else []
+        if not r.ok:
+            log.error("Telegram getUpdates: %s %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.error("Telegram getUpdates не прошёл: %s", type(exc).__name__)
+        return
+    replies = []
+    for u in updates:
+        st["tg_offset"] = u["update_id"] + 1
+        msg = u.get("message") or {}
+        chat = msg.get("chat") or {}
+        text = (msg.get("text") or "").strip().lower()
+        if chat.get("type") not in ("private", "group", "supergroup") or "id" not in chat:
+            continue
+        cid = str(chat["id"])
+        if text.startswith("/start"):
+            if cid not in subs:
+                subs[cid] = {"since": now_utc().isoformat()}   # имена не храним: журнал и репозиторий видны
+                log.info("Новый подписчик, всего: %d", len(subs))
+            replies.append((cid, WELCOME))
+        elif text.startswith("/stop"):
+            if subs.pop(cid, None):
+                log.info("Подписчик отписался, всего: %d", len(subs))
+            replies.append((cid, BYE))
+    for cid, text in replies:
+        tg_send(cid, text)
         time.sleep(1.1)
+    if updates:
+        # подтверждаем Telegram, что эти сообщения обработаны
+        try:
+            requests.get(f"https://api.telegram.org/bot{token}/getUpdates",
+                         params={"offset": st["tg_offset"], "timeout": 0}, timeout=(10, 30))
+        except Exception:
+            pass
+
+
+def recipients(st: dict) -> list[str]:
+    main_chat = os.environ["TELEGRAM_CHAT_ID"].strip()
+    return [main_chat] + [c for c in st.get("subscribers", {}) if c != main_chat]
+
+
+def send_telegram(messages: list[str], st: dict) -> None:
+    """Рассылает сообщения: основной чат (TELEGRAM_CHAT_ID) + все, кто нажал /start."""
+    token, main_chat = tg_token(), os.environ["TELEGRAM_CHAT_ID"].strip()
+    telegram_check(token, main_chat)
+    delivered = 0
+    for chat in recipients(st):
+        status = "ok"
+        for text in messages:
+            status = tg_send(chat, text)
+            if status != "ok":
+                break
+            time.sleep(1.1)
+        if status == "blocked":
+            log.info("Подписчик заблокировал бота — убираю из рассылки")
+            st.get("subscribers", {}).pop(chat, None)
+        elif status == "ok":
+            delivered += 1
+    log.info("Разослано: %d из %d получателей", delivered, len(recipients(st)))
+    if delivered == 0:
+        raise RuntimeError("Telegram не принял сообщения ни для одного получателя")
 
 
 # ================================================================ запуск
@@ -705,6 +787,8 @@ def main() -> int:
         return 2
 
     st = load_state()
+    if not args.dry_run:
+        sync_subscribers(st)
     new_acts, failed_sources = collect_acts(cfg, st, hours)
     log.info("Законы и нормы: новых %d, не открылось источников %d", len(new_acts), len(failed_sources))
 
@@ -714,7 +798,7 @@ def main() -> int:
             if args.dry_run:
                 print("\n\n──────────\n\n".join(msgs))
             else:
-                send_telegram(msgs)
+                send_telegram(msgs, st)
                 st.setdefault("alerted", [])
                 st["alerted"] = (st["alerted"] + [a.key for a in new_acts])[-500:]
         if not args.dry_run:
@@ -728,12 +812,13 @@ def main() -> int:
     news = select_news(raw, cfg, st)
     log.info("Новостей после отбора: %d", len(news))
     if not (news or acts) and not cfg.get("send_empty", True):
+        save_state(st) if not args.dry_run else None
         return 0
     msgs = build_digest(news, acts, cfg, failed_news, failed_sources, set(st.get("alerted", [])))
     if args.dry_run:
         print("\n\n──────────\n\n".join(msgs))
         return 0
-    send_telegram(msgs)
+    send_telegram(msgs, st)
     for n in news:
         st["seen"][n.key] = now_utc().isoformat()
     save_state(st)
