@@ -347,7 +347,13 @@
 "regulation.gov.ru|https://regulation.gov.ru/projects/173251": "2026-11-26T08:41:06.182122+00:00",
 "regulation.gov.ru|https://regulation.gov.ru/projects/173247": "2026-11-26T08:41:06.182146+00:00",
 "regulation.gov.ru|https://regulation.gov.ru/projects/173245": "2026-11-26T08:41:06.182154+00:00",
-"regulation.gov.ru|https://regulation.gov.ru/projects/173240": "2026-11-26T08:41:06.182157+00:00"
+"regulation.gov.ru|https://regulation.gov.ru/projects/173240": "2026-11-26T08:41:06.182157+00:00",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173258": "2026-11-26T10:28:03.273344+00:00",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173257": "2026-11-26T10:28:03.273375+00:00",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173256": "2026-11-26T10:28:03.273379+00:00",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173254": "2026-11-26T10:28:03.273385+00:00",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173253": "2026-11-26T10:28:03.273387+00:00",
+"ФАУ ФЦС|https://faufcc.ru/press-tsentr/novosti/sbalansirovannaia-biudzhetnaia-politika-osnova-dlia-ekonomicheskogo-rosta-i-investitsii": "2026-11-26T10:28:03.273576+00:00"
 },
 "acts": [
 {
@@ -415,6 +421,17 @@
 "date": "25.11.2026",
 "extra": "разработчик: \"Обыденникова Елизавета Андреевна\"",
 "first_seen": "2026-11-25T22:45:20.334702+00:00"
+},
+{
+"key": "regulation.gov.ru|https://regulation.gov.ru/projects/173256",
+"title": "Приказ Минкультуры России «Об утверждении требований к осуществлению деятельности и градостроительному регламенту в границах территории объекта культурного наследия (памятника истории и культуры) народов Российской Федерации федерального значения – достопримечательное место «Есенинская Русь – место, связанное с жизнью и творчеством поэта \nС.А. Есенина», конец XIX – начало XX вв., расположенного по адресу: Рязанская область, Рыбновский район, Рязанский район, г. Рязань»",
+"url": "https://regulation.gov.ru/projects/173256",
+"source": "regulation.gov.ru",
+"level": "federal",
+"kind": "\"Проект ведомственного акта\"",
+"date": "26.11.2026",
+"extra": "разработчик: \"Заиграева Ирина Николаевна\"",
+"first_seen": "2026-11-26T10:28:03.273381+00:00"
 }
 ],
 "bootstrapped": [
@@ -424,7 +441,8 @@
 "ЗС Приморья — принятые законы"
 ],
 "alerted": [
-"regulation.gov.ru|https://regulation.gov.ru/projects/173142"
+"regulation.gov.ru|https://regulation.gov.ru/projects/173142",
+"regulation.gov.ru|https://regulation.gov.ru/projects/173256"
 ],
 "subscribers": {
 "1096158889": {
